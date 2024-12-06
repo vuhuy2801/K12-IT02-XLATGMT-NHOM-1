@@ -16,6 +16,7 @@ from sklearn.metrics import classification_report
 from .config import ModelConfig, DataConfig, TrainingConfig
 from .model import AnimalValidationModel, AnimalClassifier, TwoStageClassifier
 from .data import AnimalDataModule
+from .reporting.report_generator import PerformanceReport
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -101,7 +102,8 @@ class StageTrainer:
             'val_accuracy': [],
             'precision': {'carnivore': [], 'herbivore': []},
             'recall': {'carnivore': [], 'herbivore': []},
-            'f1': {'carnivore': [], 'herbivore': []}
+            'f1': {'carnivore': [], 'herbivore': []},
+            'learning_rate': []
         }
         
         logger.info(f"Khởi tạo trainer cho {stage_name} với device: {self.device}")
@@ -157,6 +159,7 @@ class StageTrainer:
         # Track learning rate
         current_lr = self.optimizer.param_groups[0]['lr']
         self.metrics['learning_rate'].append(current_lr)
+        logger.info(f"Current learning rate: {current_lr:.6f}")
         
         return {
             'loss': epoch_loss,
@@ -354,9 +357,9 @@ class TwoStageTrainer:
             
             # Training
             train_metrics = self.stage1_trainer.train_epoch()
-            val_metrics = self.stage1_trainer.validate()
+            val_metrics, val_true, val_pred = self.stage1_trainer.validate()  # Unpack tuple
             
-            # Update history - handle metrics consistently
+            # Update history
             history['stage1']['train_loss'].append(train_metrics['loss'])
             history['stage1']['train_accuracy'].append(train_metrics['accuracy'])
             history['stage1']['val_loss'].append(val_metrics['loss'])
@@ -387,9 +390,9 @@ class TwoStageTrainer:
             
             # Training
             train_metrics = self.stage2_trainer.train_epoch()
-            val_metrics = self.stage2_trainer.validate()
+            val_metrics, val_true, val_pred = self.stage2_trainer.validate()  # Unpack tuple
             
-            # Update history - handle metrics consistently
+            # Update history
             history['stage2']['train_loss'].append(train_metrics['loss'])
             history['stage2']['train_accuracy'].append(train_metrics['accuracy'])
             history['stage2']['val_loss'].append(val_metrics['loss'])
@@ -417,7 +420,7 @@ def train_two_stage_model(
     model_config: ModelConfig,
     train_config: Optional[TrainingConfig] = None
 ) -> Tuple[TwoStageClassifier, Dict[str, Dict[str, List[float]]]]:
-    """Hàm helper để khởi tạo và train toàn bộ hệ thống"""
+    """Hàm helper để khởi tạo và train toàn bộ hệ th��ng"""
     if train_config is None:
         train_config = TrainingConfig()
     

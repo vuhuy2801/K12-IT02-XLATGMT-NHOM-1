@@ -2,11 +2,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Tuple
 import torch
+import numpy as np
+import random
+
+def set_random_seed(seed: int = 42) -> None:
+    """Thiết lập seed cho tất cả các nguồn ngẫu nhiên để đảm bảo kết quả reproducible
+    
+    Args:
+        seed: Giá trị seed để sử dụng (mặc định: 42)
+    """
+    # Thiết lập seed cho Python random
+    random.seed(seed)
+    
+    # Thiết lập seed cho NumPy
+    np.random.seed(seed)
+    
+    # Thiết lập seed cho PyTorch
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # Nếu sử dụng multi-GPU
+    
+    # Một số cài đặt bổ sung cho PyTorch để đảm bảo deterministic
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 @dataclass
 class DataConfig:
     """Cấu hình cho data pipeline"""
     data_dir: Path
+    random_seed: int = 42  # Thêm random seed vào config
     image_size: int = 224
     batch_size: int = 32
     num_workers: int = 4
@@ -52,7 +76,7 @@ class ModelConfig:
     yolo: YOLOConfig = field(default_factory=YOLOConfig)
     
     # Thêm các tham số mới
-    use_detection: bool = False  # Bật/tắt detection stage
+    use_detection: bool = True  # Thay đổi từ False thành True
     min_detection_size: Tuple[int, int] = (32, 32)  # Kích thước tối thiểu cho detected objects
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     use_validation_model: bool = True  # Bật/tắt validation stage
@@ -109,6 +133,9 @@ class PredictionConfig:
 
 def load_config():
     """Load và trả về các cấu hình mặc định"""
+    # Thiết lập random seed ngay khi load config
+    set_random_seed(42)
+    
     data_config = DataConfig(
         data_dir=Path("dataset")
     )

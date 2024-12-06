@@ -6,8 +6,11 @@ from logging.handlers import RotatingFileHandler
 
 # Fix encoding cho Windows
 if sys.platform.startswith('win'):
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+    # Chỉ set encoding cho stdout nếu nó chưa được wrapped
+    if not isinstance(sys.stdout, codecs.StreamWriter):
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+    if not isinstance(sys.stderr, codecs.StreamWriter):    
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
 
 def setup_logging(log_dir: str = "logs") -> None:
     """Cấu hình logging system"""
@@ -20,21 +23,26 @@ def setup_logging(log_dir: str = "logs") -> None:
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     
-    # File handler với rotation
+    # File handler với encoding UTF-8
     file_handler = RotatingFileHandler(
         log_dir / "animal_classifier.log",
         maxBytes=10*1024*1024,  # 10MB
-        backupCount=5
+        backupCount=5,
+        encoding='utf-8'  # Thêm encoding UTF-8
     )
     file_handler.setFormatter(formatter)
     
-    # Console handler
+    # Console handler với encoding UTF-8 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     
     # Root logger configuration
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
+    
+    # Xóa handlers cũ nếu có
+    root_logger.handlers.clear()
+    
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
     

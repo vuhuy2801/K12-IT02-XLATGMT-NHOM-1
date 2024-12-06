@@ -42,3 +42,13 @@ python main.py predict path/to/image.jpg --show
     ]
 }
 ```
+
+## API Usage
+
+### Running the API Server
+
+1. Install additional dependencies:
+
+```bash
+pip install fastapi uvicorn python-multipart aiofiles
+```

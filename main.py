@@ -15,7 +15,6 @@ from src.model import TwoStageClassifier
 from src.trainer import train_two_stage_model
 from src.predict import create_predictor
 from src.utils.logging import setup_logging
-from src.reporting import PerformanceReport
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

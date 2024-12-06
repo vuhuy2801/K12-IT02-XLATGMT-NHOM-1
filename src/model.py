@@ -149,8 +149,11 @@ class TwoStageClassifier(nn.Module):
         self.validation_model = AnimalValidationModel(config)
         self.classification_model = AnimalClassifier(config)
         
-        # Khởi tạo YOLO detector nếu được bật
-        self.detector = YOLODetector(config.yolo) if config.use_detection else None
+        # Đảm bảo detector được khởi tạo
+        if config.use_detection:
+            self.detector = YOLODetector(config.yolo)
+        else:
+            raise ValueError("Detection must be enabled for this model")
         
         logger.info(f"Initialized TwoStageClassifier with config: {config}")
         
