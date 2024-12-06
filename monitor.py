@@ -21,8 +21,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
-from model import AnimalClassifier
-from data import AnimalDataModule
+from src.model import AnimalClassifier
+from src.data import AnimalDataModule
 
 # Configure logging
 logging.basicConfig(
@@ -285,7 +285,7 @@ class ModelMonitor:
 
 if __name__ == "__main__":
     from model import ModelConfig
-    from data import DataConfig
+    from src.data import DataConfig
     
     # Configurations
     data_config = DataConfig(
