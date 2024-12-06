@@ -52,9 +52,10 @@ class ModelConfig:
     yolo: YOLOConfig = field(default_factory=YOLOConfig)
     
     # Thêm các tham số mới
-    use_detection: bool = True  # Bật/tắt detection stage
+    use_detection: bool = False  # Bật/tắt detection stage
     min_detection_size: Tuple[int, int] = (32, 32)  # Kích thước tối thiểu cho detected objects
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    use_validation_model: bool = True  # Bật/tắt validation stage
 
 @dataclass
 class TrainingConfig:
@@ -83,6 +84,13 @@ class TrainingConfig:
     track_gpu_usage: bool = True
     track_memory_usage: bool = True
     track_gradient_norms: bool = True
+    
+    # Reporting settings
+    generate_plots: bool = True
+    save_confusion_matrix: bool = True
+    save_classification_report: bool = True
+    plot_metrics_interval: int = 5  # Plot metrics every N epochs
+    report_dir: Path = Path("reports")
 
 @dataclass 
 class PredictionConfig:

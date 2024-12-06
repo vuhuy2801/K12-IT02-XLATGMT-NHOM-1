@@ -145,11 +145,12 @@ class TwoStageClassifier(nn.Module):
         super().__init__()
         self.config = config
         
+        # Khởi tạo các models
+        self.validation_model = AnimalValidationModel(config)
+        self.classification_model = AnimalClassifier(config)
+        
         # Khởi tạo YOLO detector nếu được bật
         self.detector = YOLODetector(config.yolo) if config.use_detection else None
-        
-        # Khởi tạo classifier
-        self.classifier = AnimalClassifier(config)
         
         logger.info(f"Initialized TwoStageClassifier with config: {config}")
         
@@ -191,7 +192,7 @@ class TwoStageClassifier(nn.Module):
         
         # Predict một lần cho cả batch
         with torch.no_grad():
-            predictions = self.classifier(batch)  # [N, num_classes]
+            predictions = self.classification_model(batch)  # [N, num_classes]
         
         return list(zip(valid_detections, predictions))
         
