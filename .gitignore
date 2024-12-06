@@ -44,3 +44,30 @@ ENV/
 Thumbs.db 
 
 .claudesync/
+
+# Data
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+*.pkl
+*.npy
+*.npz
+
+# Logs
+logs/
+*.log
+
+# API
+*.pid
+*.sock
+
+# Monitoring
+monitoring/
+monitoring/**/
+*.png
+
+test_images/
+checkpoints/
+myenv/

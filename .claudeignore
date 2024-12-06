@@ -1,0 +1,6 @@
+dataset/
+dataset/**/
+test_images/
+checkpoints/
+.gitignore
+.claudeignore
