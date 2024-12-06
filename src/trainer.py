@@ -15,7 +15,6 @@ from tqdm import tqdm
 from .config import ModelConfig, DataConfig, TrainingConfig
 from .model import AnimalValidationModel, AnimalClassifier, TwoStageClassifier
 from .data import AnimalDataModule
-from .reporting import ModelPerformanceVisualizer, PerformanceReport
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -87,24 +86,14 @@ class StageTrainer:
         self.checkpoint_dir = config.checkpoint_dir / stage_name
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Thêm tracking cho metrics
+        # Đơn giản hóa metrics tracking
         self.metrics = {
             'train_loss': [],
             'train_accuracy': [],
             'val_loss': [],
             'val_accuracy': [],
-            'learning_rate': [],
-            'precision': {class_name: [] for class_name in ['carnivore', 'herbivore']},
-            'recall': {class_name: [] for class_name in ['carnivore', 'herbivore']},
-            'f1': {class_name: [] for class_name in ['carnivore', 'herbivore']},
-            'predictions': {
-                'y_true': [],
-                'y_pred': []
-            }
+            'learning_rate': []
         }
-        
-        # Thêm visualizer
-        self.visualizer = ModelPerformanceVisualizer(config.checkpoint_dir)
         
         logger.info(f"Khởi tạo trainer cho {stage_name} với device: {self.device}")
 
@@ -167,13 +156,11 @@ class StageTrainer:
     
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
-        """Chạy validation với metrics mở rộng"""
+        """Chạy validation với metrics cơ bản"""
         self.model.eval()
         total_loss = 0.0
         correct = 0
         total = 0
-        y_true = []
-        y_pred = []
         
         for images, targets in tqdm(self.val_loader, desc=f"Validating {self.stage_name}"):
             images, targets = images.to(self.device), targets.to(self.device)
@@ -186,41 +173,14 @@ class StageTrainer:
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
-            
-            y_true.extend(targets.cpu().numpy())
-            y_pred.extend(predicted.cpu().numpy())
-        
-        # Tính toán metrics chi tiết
-        report = self.visualizer.generate_classification_report(
-            y_true, y_pred, 
-            classes=['carnivore', 'herbivore']
-        )
-        
-        # Vẽ confusion matrix
-        self.visualizer.plot_confusion_matrix(
-            y_true, y_pred,
-            classes=['carnivore', 'herbivore']
-        )
-        
-        # Cập nhật metrics
-        for class_name in ['carnivore', 'herbivore']:
-            self.metrics['precision'][class_name].append(report[class_name]['precision'])
-            self.metrics['recall'][class_name].append(report[class_name]['recall'])
-            self.metrics['f1'][class_name].append(report[class_name]['f1-score'])
-        
-        # Vẽ biểu đồ precision-recall và f1
-        self.visualizer.plot_precision_recall(self.metrics)
-        self.visualizer.plot_f1_scores(self.metrics)
         
         return {
             'loss': total_loss / len(self.val_loader),
-            'accuracy': 100. * correct / total,
-            'report': report
+            'accuracy': 100. * correct / total
         }
     
     def save_checkpoint(self, epoch: int, metrics: Dict[str, float]):
-        """Lưu checkpoint và visualizations"""
-        # Save model checkpoint
+        """Lưu checkpoint"""
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -232,13 +192,7 @@ class StageTrainer:
         
         path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
         torch.save(checkpoint, path)
-        
-        # Generate and save visualizations
-        if (epoch + 1) % self.config.visualization_interval == 0:
-            self.visualizer.plot_training_history(self.metrics)
-            self.visualizer.plot_learning_rate(self.metrics)
-            
-        logger.info(f"Saved checkpoint and visualizations for epoch {epoch}")
+        logger.info(f"Saved checkpoint for epoch {epoch}")
 
 class TwoStageTrainer:
     """Trainer chính quản lý việc huấn luyện cả 2 stage"""
@@ -274,7 +228,6 @@ class TwoStageTrainer:
     
     def train(self) -> Dict[str, Dict[str, List[float]]]:
         """Huấn luyện toàn bộ hệ thống"""
-        # Initialize history with all expected metrics
         history = {
             'stage1': {
                 'train_loss': [], 'train_accuracy': [],
@@ -357,21 +310,12 @@ def train_two_stage_model(
     if train_config is None:
         train_config = TrainingConfig()
     
-    # Khởi tạo data module
     data_module = AnimalDataModule(data_config)
-    
-    # Tạo model
     device = torch.device(train_config.device)
     model = TwoStageClassifier(model_config).to(device)
     
-    # Khởi tạo trainer và train
     trainer = TwoStageTrainer(model, data_module, train_config)
     history = trainer.train()
-    
-    # Lưu metrics
-    report_generator = PerformanceReport()
-    experiment_dir = report_generator.save_metrics(history)
-    logger.info(f"Đã lưu training metrics tại: {experiment_dir}")
     
     return model, history
 

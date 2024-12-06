@@ -36,7 +36,7 @@ class YOLODetector:
             image: PIL Image
             
         Returns:
-            List[Detection]: Danh sách các detection tìm thấy
+            List[Detection]: Danh sách các detection t��m thấy
         """
         # Convert PIL Image to format YOLO expects
         img_array = np.array(image)
@@ -66,6 +66,20 @@ class YOLODetector:
         detections = self._apply_nms(detections)
         
         return detections
+
+    def crop_detection(self, image: Image.Image, detection: Detection) -> Image.Image:
+        """
+        Crop ảnh theo bounding box của detection
+        
+        Args:
+            image: PIL Image gốc
+            detection: Detection object chứa bbox
+            
+        Returns:
+            PIL Image đã được crop
+        """
+        x1, y1, x2, y2 = map(int, detection.bbox)
+        return image.crop((x1, y1, x2, y2))
 
     def _apply_nms(self, detections: List[Detection], iou_threshold: float = 0.45) -> List[Detection]:
         """Áp dụng NMS để loại bỏ các detection chồng chéo"""

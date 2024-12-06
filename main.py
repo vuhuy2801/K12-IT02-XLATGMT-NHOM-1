@@ -83,93 +83,69 @@ def predict(args):
     """Chạy prediction trên ảnh"""
     _, model_config, _, prediction_config = load_config()
     
-    # Load model
-    device = torch.device(prediction_config.device)
-    model = TwoStageClassifier(model_config).to(device)
-    
-    # Load checkpoints
-    if prediction_config.stage1_model_path:
-        stage1_ckpt = torch.load(prediction_config.stage1_model_path)
-        model.validation_model.load_state_dict(stage1_ckpt['model_state_dict'])
-    
-    if prediction_config.stage2_model_path:
-        stage2_ckpt = torch.load(prediction_config.stage2_model_path)
-        model.classification_model.load_state_dict(stage2_ckpt['model_state_dict'])
-    
-    model.eval()
-    
-    # Load và preprocess ảnh
+    # Tạo predictor
     try:
-        image = Image.open(args.image_path).convert('RGB')
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
-        input_tensor = transform(image).unsqueeze(0).to(device)
+        predictor = create_predictor(model_config, prediction_config)
+    except Exception as e:
+        logger.error(f"Lỗi khi tạo predictor: {str(e)}")
+        return
         
+    # Load và validate ảnh
+    try:
+        image = cv2.imread(args.image_path)
+        if image is None:
+            raise ValueError(f"Không thể đọc ảnh từ {args.image_path}")
+        logger.info(f"Đã load ảnh: {args.image_path} ({image.shape})")
     except Exception as e:
         logger.error(f"Lỗi khi load ảnh: {str(e)}")
         return
+        
+    # Convert BGR sang RGB cho model
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(image_rgb)
     
-    # Thực hiện prediction
-    with torch.no_grad():
-        outputs = model(input_tensor)
-        validation_score = outputs['validation'].item()
-        
-        result = {
-            'status': 'success',
-            'predictions': []
-        }
-        
-        # Kiểm tra validation score
-        if validation_score > model_config.validation_threshold:
-            class_probs = torch.softmax(outputs['classification'], dim=1)
-            predicted_class = torch.argmax(class_probs, dim=1).item()
-            confidence = class_probs[0][predicted_class].item()
-            
-            animal_type = 'carnivore' if predicted_class == 0 else 'herbivore'
-            
-            result['predictions'].append({
-                'animal_type': animal_type,
-                'validation_confidence': validation_score,
-                'class_confidence': confidence
-            })
-        else:
-            result['status'] = 'no_animal_detected'
-            result['message'] = 'Không phát hiện động vật trong ảnh'
+    # Thực hiện prediction với timing
+    logger.info("Bắt đầu prediction...")
+    start_time = time.time()
+    result = predictor.predict(pil_image)
+    inference_time = (time.time() - start_time) * 1000
+    logger.info(f"Hoàn thành prediction trong {inference_time:.1f}ms")
     
     # In kết quả
     print("\n=== Kết quả Phân tích ===")
     print(f"Status: {result['status']}")
     
     if result['status'] == 'success':
-        for pred in result['predictions']:
-            print(f"\nLoại động vật: {pred['animal_type'].upper()}")
-            print(f"Độ tin cậy validation: {pred['validation_confidence']:.2%}")
-            print(f"Độ tin cậy phân loại: {pred['class_confidence']:.2%}")
+        print(f"\nTìm thấy {len(result['predictions'])} đối tượng:")
+        for i, pred in enumerate(result['predictions'], 1):
+            print(f"\n{i}. Đối tượng:")
+            print(f"   - Loại: {pred['animal_type'].upper()}")
+            print(f"   - Độ tin cậy phát hiện: {pred['confidence']:.1%}")
+            print(f"   - Độ tin cậy phân loại: {pred['class_confidence']:.1%}")
+            if pred['bbox']:
+                x1, y1, x2, y2 = map(int, pred['bbox'])
+                print(f"   - Vị trí: ({x1}, {y1}) -> ({x2}, {y2})")
     else:
         print(f"\nThông báo: {result['message']}")
     
+    # Vẽ kết quả lên ảnh
+    output_image = draw_predictions(image, result)
+    
+    # Tạo thư mục output nếu chưa tồn tại
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
+    
+    # Lưu ảnh kết quả với timestamp
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    output_path = output_dir / f"pred_{timestamp}_{Path(args.image_path).name}"
+    cv2.imwrite(str(output_path), output_image)
+    logger.info(f"Đã lưu kết quả tại: {output_path}")
+    
     # Hiển thị ảnh nếu được yêu cầu
     if args.show:
-        plt.figure(figsize=(10, 8))
-        plt.imshow(image)
-        plt.axis('off')
-        
-        if result['status'] == 'success':
-            pred = result['predictions'][0]
-            title = f"{pred['animal_type'].upper()}\n"
-            title += f"Val Conf: {pred['validation_confidence']:.2%}\n"
-            title += f"Class Conf: {pred['class_confidence']:.2%}"
-            plt.title(title)
-            
-        plt.show()
-    
-    return result
+        cv2.imshow('Animal Detection & Classification', output_image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
 def train(args):
     """Huấn luyện model"""
