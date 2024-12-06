@@ -6,8 +6,11 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from torch import Tensor
+from PIL import Image
+from torchvision import transforms
 
 from .config import ModelConfig
+from .detector import YOLODetector, Detection
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,15 +54,22 @@ class AnimalValidationModel(nn.Module):
             list(range(38, 68))      # Reptiles, amphibians
         )
         
-    def forward(self, x: Tensor) -> Tuple[Tensor, float]:
+    def forward(self, x: Tensor) -> Tensor:
         """
-        Forward pass trả về logits và confidence score
+        Forward pass returns only logits for training
+        """
+        outputs = self.model(x)
+        return outputs
+    
+    def get_prediction_with_confidence(self, x: Tensor) -> Tuple[Tensor, float]:
+        """
+        Get both prediction and confidence score (for inference)
         """
         outputs = self.model(x)
         probabilities = torch.nn.functional.softmax(outputs, dim=1)
         confidence = torch.max(probabilities, dim=1)[0]
         
-        return outputs, confidence.item()
+        return outputs, confidence
 
 class CustomHead(nn.Module):
     """Custom classification head cho stage 2"""
@@ -129,53 +139,76 @@ class AnimalClassifier(nn.Module):
         return self.backbone(x)
 
 class TwoStageClassifier(nn.Module):
-    """Mô hình kết hợp cả 2 stage"""
+    """Mô hình 2 giai đoạn: YOLO Detection + Classification"""
     
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.validation_model = AnimalValidationModel(config)
-        self.classification_model = AnimalClassifier(config)
-    
-    def forward(self, x: Tensor) -> Dict[str, Any]:
+        
+        # Khởi tạo YOLO detector nếu được bật
+        self.detector = YOLODetector(config.yolo) if config.use_detection else None
+        
+        # Khởi tạo classifier
+        self.classifier = AnimalClassifier(config)
+        
+        logger.info(f"Initialized TwoStageClassifier with config: {config}")
+        
+    def detect_and_classify(self, image: Image.Image) -> List[Tuple[Detection, torch.Tensor]]:
         """
-        Forward pass qua cả 2 stage
-        Trả về dict chứa status, prediction và confidence
+        Detect và phân loại động vật trong ảnh
+        
+        Args:
+            image: PIL Image
+            
+        Returns:
+            List[Tuple[Detection, Tensor]]: List các cặp (detection, prediction)
         """
-        # Stage 1: Kiểm tra có phải động vật không
-        _, validation_confidence = self.validation_model(x)
+        detections = self.detector.detect(image)
+        if not detections:
+            return []
         
-        if validation_confidence < self.config.validation_threshold:
-            return {
-                'status': 'invalid_input',
-                'message': 'Ảnh này có vẻ kh��ng phải động vật',
-                'confidence': validation_confidence,
-                'suggestion': 'Vui lòng thử lại với ảnh động vật khác'
-            }
+        # Batch processing thay vì xử lý từng detection
+        crops = []
+        valid_detections = []
         
-        # Stage 2: Phân loại loại động vật
-        outputs = self.classification_model(x)
-        probabilities = torch.nn.functional.softmax(outputs, dim=1)
-        confidence, prediction = torch.max(probabilities, dim=1)
-        confidence = confidence.item()
+        for detection in detections:
+            # Crop ảnh theo bbox
+            x1, y1, x2, y2 = detection.bbox
+            cropped = image.crop((x1, y1, x2, y2))
+            
+            if (cropped.size[0] >= self.config.min_detection_size[0] and 
+                cropped.size[1] >= self.config.min_detection_size[1]):
+                # Preprocess image
+                tensor = self._preprocess_image(cropped)
+                crops.append(tensor)
+                valid_detections.append(detection)
         
-        if confidence < self.config.classification_threshold:
-            return {
-                'status': 'low_confidence',
-                'message': 'Không thể phân loại với độ tin cậy cao',
-                'confidence': confidence,
-                'suggestion': 'Vui lòng thử lại với ảnh rõ nét hơn'
-            }
+        if not crops:
+            return []
         
-        prediction_map = {0: 'Động vật ăn thịt', 1: 'Động vật ăn cỏ'}
-        predicted_class = prediction_map[prediction.item()]
+        # Stack tất cả crops thành một batch và squeeze để bỏ dimension thừa
+        batch = torch.cat(crops, dim=0)  # [N, 3, 224, 224]
         
-        return {
-            'status': 'success',
-            'prediction': predicted_class,
-            'confidence': confidence,
-            'details': f'Động vật này có vẻ là {predicted_class.lower()}'
-        }
+        # Predict một lần cho cả batch
+        with torch.no_grad():
+            predictions = self.classifier(batch)  # [N, num_classes]
+        
+        return list(zip(valid_detections, predictions))
+        
+    def _preprocess_image(self, image: Image.Image) -> torch.Tensor:
+        """Chuẩn bị ảnh cho classifier"""
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
+        ])
+        
+        # Chuyển đổi sang tensor và thêm batch dimension
+        tensor = transform(image).unsqueeze(0)  # [1, 3, 224, 224]
+        return tensor.to(self.config.device)
 
 def create_model(config: ModelConfig, device: torch.device) -> TwoStageClassifier:
     """Hàm tạo model và khởi tạo"""

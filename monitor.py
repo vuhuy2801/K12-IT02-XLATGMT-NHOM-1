@@ -10,6 +10,7 @@ import GPUtil
 
 import torch
 import numpy as np
+from PIL import Image
 from sklearn.metrics import (
     confusion_matrix, 
     precision_recall_fscore_support,
@@ -21,7 +22,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
-from src.model import AnimalClassifier
+from src.model import TwoStageClassifier
 from src.data import AnimalDataModule
 
 # Configure logging
@@ -46,62 +47,48 @@ class MonitoringConfig:
 class PerformanceMetrics:
     """Handles calculation and tracking of model performance metrics"""
     
-    def __init__(self, num_classes: int):
-        self.num_classes = num_classes
+    def __init__(self):
         self.reset()
     
     def reset(self):
         """Reset all metrics"""
-        self.predictions = []
-        self.targets = []
-        self.probabilities = []
+        self.detections = []
         self.batch_times = []
         self.inference_times = []
+        self.detection_confidences = []
+        self.classification_confidences = []
     
-    def update(self, preds: torch.Tensor, targets: torch.Tensor, 
-               probs: torch.Tensor, batch_time: float, 
-               inference_time: float):
+    def update(self, detections: List[Dict], batch_time: float, inference_time: float):
         """Update metrics with batch results"""
-        self.predictions.extend(preds.cpu().numpy())
-        self.targets.extend(targets.cpu().numpy())
-        self.probabilities.extend(probs.cpu().numpy())
+        self.detections.extend(detections)
         self.batch_times.append(batch_time)
         self.inference_times.append(inference_time)
+        
+        for det in detections:
+            self.detection_confidences.append(det['confidence'])
+            if 'class_confidence' in det:
+                self.classification_confidences.append(det['class_confidence'])
     
     def compute_metrics(self) -> Dict[str, Any]:
         """Compute all metrics"""
-        predictions = np.array(self.predictions)
-        targets = np.array(self.targets)
-        probabilities = np.array(self.probabilities)
-        
-        # Calculate basic metrics
-        precision, recall, f1, support = precision_recall_fscore_support(
-            targets, predictions, average='weighted'
-        )
-        
-        # Calculate confusion matrix
-        conf_matrix = confusion_matrix(targets, predictions)
-        
-        # Calculate per-class metrics
-        class_report = classification_report(
-            targets, predictions, output_dict=True
-        )
-        
-        # Calculate timing metrics
-        avg_batch_time = np.mean(self.batch_times)
-        avg_inference_time = np.mean(self.inference_times)
-        
-        return {
-            'accuracy': np.mean(predictions == targets),
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1,
-            'confusion_matrix': conf_matrix,
-            'class_report': class_report,
-            'avg_batch_time': avg_batch_time,
-            'avg_inference_time': avg_inference_time,
-            'total_samples': len(predictions)
+        metrics = {
+            'avg_detection_confidence': np.mean(self.detection_confidences),
+            'avg_batch_time': np.mean(self.batch_times),
+            'avg_inference_time': np.mean(self.inference_times),
+            'total_detections': len(self.detections),
+            'detections_per_image': len(self.detections) / len(self.batch_times)
         }
+        
+        if self.classification_confidences:
+            metrics['avg_classification_confidence'] = np.mean(self.classification_confidences)
+            
+            # Count animal types
+            animal_types = [d['animal_type'] for d in self.detections if 'animal_type' in d]
+            if animal_types:
+                type_counts = pd.Series(animal_types).value_counts()
+                metrics['animal_type_distribution'] = type_counts.to_dict()
+        
+        return metrics
 
 class SystemMetrics:
     """Handles system resource monitoring"""
@@ -157,7 +144,7 @@ class ModelMonitor:
     
     def __init__(
         self,
-        model: AnimalClassifier,
+        model: TwoStageClassifier,
         data_module: AnimalDataModule,
         config: MonitoringConfig
     ):
@@ -165,15 +152,15 @@ class ModelMonitor:
         self.data_module = data_module
         self.config = config
         
-        # Create output directories
+        # Create all required directories
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         self.config.tensorboard_dir.mkdir(parents=True, exist_ok=True)
+        # Create logs directory
+        self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
         
         # Initialize components
         self.writer = SummaryWriter(self.config.tensorboard_dir)
-        self.performance_metrics = PerformanceMetrics(
-            num_classes=model.config.num_classes
-        )
+        self.performance_metrics = PerformanceMetrics()
         self.system_metrics = SystemMetrics(
             track_gpu=config.track_gpu_metrics
         )
@@ -191,34 +178,62 @@ class ModelMonitor:
         self.model.eval()
         self.performance_metrics.reset()
         
-        for batch_idx, (images, targets) in enumerate(data_loader):
+        device = next(self.model.parameters()).device
+        
+        for batch_idx, (images, _) in enumerate(data_loader):
             batch_start = time.time()
             
             # Move to device
-            images = images.to(next(self.model.parameters()).device)
-            targets = targets.to(next(self.model.parameters()).device)
+            images = images.to(device)
             
-            # Inference
-            inference_start = time.time()
-            outputs = self.model(images)
-            inference_time = time.time() - inference_start
+            # Convert to PIL images for detection
+            pil_images = []
+            for img in images:
+                # Denormalize if needed
+                img = img.cpu().numpy().transpose(1, 2, 0)
+                img = (img * 255).astype(np.uint8)  # Scale to [0, 255]
+                pil_images.append(Image.fromarray(img))
             
-            # Get predictions and probabilities
-            probabilities = torch.nn.functional.softmax(outputs, dim=1)
-            predictions = torch.argmax(outputs, dim=1)
+            # Process each image
+            batch_detections = []
+            inference_times = []
+            
+            for pil_img in pil_images:
+                inference_start = time.time()
+                results = self.model.detect_and_classify(pil_img)
+                inference_time = time.time() - inference_start
+                inference_times.append(inference_time)
+                
+                # Convert results to dict format
+                detections = []
+                for det, logits in results:
+                    probs = torch.softmax(logits, dim=0)
+                    pred_class = torch.argmax(probs).item()
+                    class_confidence = probs[pred_class].item()
+                    animal_type = 'carnivore' if pred_class == 0 else 'herbivore'
+                    
+                    detection_dict = {
+                        'bbox': det.bbox,
+                        'confidence': det.confidence,
+                        'animal_type': animal_type,
+                        'class_confidence': class_confidence
+                    }
+                    detections.append(detection_dict)
+                batch_detections.extend(detections)
             
             # Update metrics
             batch_time = time.time() - batch_start
             self.performance_metrics.update(
-                predictions, targets, probabilities,
-                batch_time, inference_time
+                batch_detections,
+                batch_time,
+                np.mean(inference_times)
             )
             
             # Log batch metrics
             if self.config.batch_metrics_logging:
                 self.writer.add_scalar(
                     'batch/inference_time',
-                    inference_time,
+                    np.mean(inference_times),
                     batch_idx
                 )
             
@@ -234,28 +249,7 @@ class ModelMonitor:
             if isinstance(value, (int, float)):
                 self.writer.add_scalar(f'metrics/{name}', value)
         
-        # Save confusion matrix plot
-        if self.config.save_confusion_matrix:
-            self._plot_confusion_matrix(metrics['confusion_matrix'])
-        
         return metrics
-    
-    def _plot_confusion_matrix(self, conf_matrix: np.ndarray):
-        """Plot and save confusion matrix"""
-        plt.figure(figsize=(12, 10))
-        sns.heatmap(
-            conf_matrix,
-            annot=True,
-            fmt='d',
-            cmap='Blues'
-        )
-        plt.title('Confusion Matrix')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
-        
-        plot_path = self.config.output_dir / 'confusion_matrix.png'
-        plt.savefig(plot_path)
-        plt.close()
     
     def generate_report(self, metrics: Dict[str, Any]):
         """Generate and save evaluation report"""
@@ -272,9 +266,11 @@ class ModelMonitor:
         
         # Log summary
         logger.info("=== Evaluation Report ===")
-        logger.info(f"Accuracy: {metrics['accuracy']:.4f}")
-        logger.info(f"F1 Score: {metrics['f1_score']:.4f}")
+        logger.info(f"Average Detection Confidence: {metrics['avg_detection_confidence']:.4f}")
+        if 'avg_classification_confidence' in metrics:
+            logger.info(f"Average Classification Confidence: {metrics['avg_classification_confidence']:.4f}")
         logger.info(f"Average Inference Time: {metrics['avg_inference_time']:.4f}s")
+        logger.info(f"Total Detections: {metrics['total_detections']}")
         logger.info(f"Report saved to: {report_path}")
     
     def close(self):
@@ -284,38 +280,44 @@ class ModelMonitor:
         logger.removeHandler(self.file_handler)
 
 if __name__ == "__main__":
-    from model import ModelConfig
-    from src.data import DataConfig
+    from src.config import load_config
     
-    # Configurations
-    data_config = DataConfig(
-        data_dir=Path("dataset")
-    )
+    # Create base monitoring directory
+    monitoring_dir = Path("monitoring")
+    monitoring_dir.mkdir(exist_ok=True)
     
-    model_config = ModelConfig(
-        num_classes=90
-    )
+    # Load configs
+    data_config, model_config, _, _ = load_config()
     
     monitoring_config = MonitoringConfig(
-        output_dir=Path("monitoring/output"),
-        tensorboard_dir=Path("monitoring/tensorboard"),
-        log_file=Path("monitoring/logs/eval.log"),
-        metrics_file=Path("monitoring/metrics.json")
+        output_dir=monitoring_dir / "output",
+        tensorboard_dir=monitoring_dir / "tensorboard",
+        log_file=monitoring_dir / "logs" / "eval.log",
+        metrics_file=monitoring_dir / "metrics.json"
     )
     
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     # Set up components
-    model = AnimalClassifier(model_config)
+    model = TwoStageClassifier(model_config)
+    model = model.to(device)  # Move model to GPU
     data_module = AnimalDataModule(data_config)
     
     # Initialize monitor
     monitor = ModelMonitor(model, data_module, monitoring_config)
     
-    # Run evaluation
-    _, _, test_loader = data_module.get_data_loaders()
-    metrics = monitor.evaluate_model(test_loader)
-    
-    # Generate report
-    monitor.generate_report(metrics)
-    
-    # Clean up
-    monitor.close() 
+    try:
+        # Run evaluation
+        _, _, test_loader = data_module.get_data_loaders()
+        metrics = monitor.evaluate_model(test_loader)
+        
+        # Generate report
+        monitor.generate_report(metrics)
+        
+    except Exception as e:
+        logger.error(f"Error during monitoring: {str(e)}")
+        raise
+    finally:
+        # Clean up
+        monitor.close() 

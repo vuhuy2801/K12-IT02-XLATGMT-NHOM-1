@@ -15,6 +15,7 @@ from tqdm import tqdm
 from .config import ModelConfig, DataConfig, TrainingConfig
 from .model import AnimalValidationModel, AnimalClassifier, TwoStageClassifier
 from .data import AnimalDataModule
+from .reporting import ModelPerformanceVisualizer, PerformanceReport
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ class StageTrainer:
         )
         
         # Mixed precision training
-        self.scaler = torch.cuda.amp.GradScaler(enabled=config.mixed_precision)
+        self.scaler = torch.amp.GradScaler('cuda', enabled=config.mixed_precision)
         
         # Monitoring
         self.writer = SummaryWriter(
@@ -86,6 +87,25 @@ class StageTrainer:
         self.checkpoint_dir = config.checkpoint_dir / stage_name
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
+        # Thêm tracking cho metrics
+        self.metrics = {
+            'train_loss': [],
+            'train_accuracy': [],
+            'val_loss': [],
+            'val_accuracy': [],
+            'learning_rate': [],
+            'precision': {class_name: [] for class_name in ['carnivore', 'herbivore']},
+            'recall': {class_name: [] for class_name in ['carnivore', 'herbivore']},
+            'f1': {class_name: [] for class_name in ['carnivore', 'herbivore']},
+            'predictions': {
+                'y_true': [],
+                'y_pred': []
+            }
+        }
+        
+        # Thêm visualizer
+        self.visualizer = ModelPerformanceVisualizer(config.checkpoint_dir)
+        
         logger.info(f"Khởi tạo trainer cho {stage_name} với device: {self.device}")
 
     def train_epoch(self) -> Dict[str, float]:
@@ -95,13 +115,17 @@ class StageTrainer:
         correct = 0
         total = 0
         
+        # Thêm tracking cho batch metrics
+        batch_losses = []
+        batch_accuracies = []
+        
         pbar = tqdm(self.train_loader, desc=f"Training {self.stage_name}")
         for batch_idx, (images, targets) in enumerate(pbar):
             images, targets = images.to(self.device), targets.to(self.device)
             
             self.optimizer.zero_grad()
             
-            with torch.cuda.amp.autocast(enabled=self.config.mixed_precision):
+            with torch.amp.autocast('cuda', enabled=self.config.mixed_precision):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, targets)
             
@@ -109,33 +133,52 @@ class StageTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             
-            total_loss += loss.item()
+            # Track batch metrics
+            batch_losses.append(loss.item())
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
+            batch_accuracies.append(100. * correct / total)
             
+            # Update progress bar
             pbar.set_postfix({
-                'loss': total_loss / (batch_idx + 1),
-                'acc': 100. * correct / total
+                'loss': np.mean(batch_losses),
+                'acc': np.mean(batch_accuracies)
             })
+            
+            # Log to TensorBoard
+            step = batch_idx + len(self.train_loader) * self.current_epoch
+            self.writer.add_scalar(f'{self.stage_name}/train_loss', loss.item(), step)
+            self.writer.add_scalar(f'{self.stage_name}/train_accuracy', 
+                                 100. * correct / total, step)
+        
+        # Calculate epoch metrics
+        epoch_loss = np.mean(batch_losses)
+        epoch_accuracy = np.mean(batch_accuracies)
+        
+        # Track learning rate
+        current_lr = self.optimizer.param_groups[0]['lr']
+        self.metrics['learning_rate'].append(current_lr)
         
         return {
-            'loss': total_loss / len(self.train_loader),
-            'accuracy': 100. * correct / total
+            'loss': epoch_loss,
+            'accuracy': epoch_accuracy
         }
     
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
-        """Chạy validation"""
+        """Chạy validation với metrics mở rộng"""
         self.model.eval()
         total_loss = 0.0
         correct = 0
         total = 0
+        y_true = []
+        y_pred = []
         
         for images, targets in tqdm(self.val_loader, desc=f"Validating {self.stage_name}"):
             images, targets = images.to(self.device), targets.to(self.device)
             
-            with torch.cuda.amp.autocast(enabled=self.config.mixed_precision):
+            with torch.amp.autocast('cuda', enabled=self.config.mixed_precision):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, targets)
             
@@ -143,25 +186,59 @@ class StageTrainer:
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
+            
+            y_true.extend(targets.cpu().numpy())
+            y_pred.extend(predicted.cpu().numpy())
+        
+        # Tính toán metrics chi tiết
+        report = self.visualizer.generate_classification_report(
+            y_true, y_pred, 
+            classes=['carnivore', 'herbivore']
+        )
+        
+        # Vẽ confusion matrix
+        self.visualizer.plot_confusion_matrix(
+            y_true, y_pred,
+            classes=['carnivore', 'herbivore']
+        )
+        
+        # Cập nhật metrics
+        for class_name in ['carnivore', 'herbivore']:
+            self.metrics['precision'][class_name].append(report[class_name]['precision'])
+            self.metrics['recall'][class_name].append(report[class_name]['recall'])
+            self.metrics['f1'][class_name].append(report[class_name]['f1-score'])
+        
+        # Vẽ biểu đồ precision-recall và f1
+        self.visualizer.plot_precision_recall(self.metrics)
+        self.visualizer.plot_f1_scores(self.metrics)
         
         return {
             'loss': total_loss / len(self.val_loader),
-            'accuracy': 100. * correct / total
+            'accuracy': 100. * correct / total,
+            'report': report
         }
     
     def save_checkpoint(self, epoch: int, metrics: Dict[str, float]):
-        """Lưu checkpoint"""
+        """Lưu checkpoint và visualizations"""
+        # Save model checkpoint
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            'metrics': metrics
+            'metrics': metrics,
+            'training_history': self.metrics
         }
         
         path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
         torch.save(checkpoint, path)
-        logger.info(f"Đã lưu checkpoint ti {path}")
+        
+        # Generate and save visualizations
+        if (epoch + 1) % self.config.visualization_interval == 0:
+            self.visualizer.plot_training_history(self.metrics)
+            self.visualizer.plot_learning_rate(self.metrics)
+            
+        logger.info(f"Saved checkpoint and visualizations for epoch {epoch}")
 
 class TwoStageTrainer:
     """Trainer chính quản lý việc huấn luyện cả 2 stage"""
@@ -197,14 +274,15 @@ class TwoStageTrainer:
     
     def train(self) -> Dict[str, Dict[str, List[float]]]:
         """Huấn luyện toàn bộ hệ thống"""
+        # Initialize history with all expected metrics
         history = {
             'stage1': {
-                'train_loss': [], 'train_acc': [],
-                'val_loss': [], 'val_acc': []
+                'train_loss': [], 'train_accuracy': [],
+                'val_loss': [], 'val_accuracy': []
             },
             'stage2': {
-                'train_loss': [], 'train_acc': [],
-                'val_loss': [], 'val_acc': []
+                'train_loss': [], 'train_accuracy': [],
+                'val_loss': [], 'val_accuracy': []
             }
         }
         
@@ -213,14 +291,21 @@ class TwoStageTrainer:
         for epoch in range(self.config.num_epochs):
             logger.info(f"\nEpoch {epoch+1}/{self.config.num_epochs}")
             
+            # Training
             train_metrics = self.stage1_trainer.train_epoch()
             val_metrics = self.stage1_trainer.validate()
             
-            # Cập nhật history
-            for k, v in train_metrics.items():
-                history['stage1'][f'train_{k}'].append(v)
-            for k, v in val_metrics.items():
-                history['stage1'][f'val_{k}'].append(v)
+            # Update history - handle metrics consistently
+            history['stage1']['train_loss'].append(train_metrics['loss'])
+            history['stage1']['train_accuracy'].append(train_metrics['accuracy'])
+            history['stage1']['val_loss'].append(val_metrics['loss'])
+            history['stage1']['val_accuracy'].append(val_metrics['accuracy'])
+            
+            # Log metrics
+            logger.info(f"Train Loss: {train_metrics['loss']:.4f}, "
+                       f"Train Acc: {train_metrics['accuracy']:.2f}%, "
+                       f"Val Loss: {val_metrics['loss']:.4f}, "
+                       f"Val Acc: {val_metrics['accuracy']:.2f}%")
             
             # Early stopping check
             if self.stage1_trainer.early_stopping(val_metrics['loss']):
@@ -236,14 +321,21 @@ class TwoStageTrainer:
         for epoch in range(self.config.num_epochs):
             logger.info(f"\nEpoch {epoch+1}/{self.config.num_epochs}")
             
+            # Training
             train_metrics = self.stage2_trainer.train_epoch()
             val_metrics = self.stage2_trainer.validate()
             
-            # Cập nhật history
-            for k, v in train_metrics.items():
-                history['stage2'][f'train_{k}'].append(v)
-            for k, v in val_metrics.items():
-                history['stage2'][f'val_{k}'].append(v)
+            # Update history - handle metrics consistently
+            history['stage2']['train_loss'].append(train_metrics['loss'])
+            history['stage2']['train_accuracy'].append(train_metrics['accuracy'])
+            history['stage2']['val_loss'].append(val_metrics['loss'])
+            history['stage2']['val_accuracy'].append(val_metrics['accuracy'])
+            
+            # Log metrics
+            logger.info(f"Train Loss: {train_metrics['loss']:.4f}, "
+                       f"Train Acc: {train_metrics['accuracy']:.2f}%, "
+                       f"Val Loss: {val_metrics['loss']:.4f}, "
+                       f"Val Acc: {val_metrics['accuracy']:.2f}%")
             
             # Early stopping check
             if self.stage2_trainer.early_stopping(val_metrics['loss']):
@@ -275,6 +367,11 @@ def train_two_stage_model(
     # Khởi tạo trainer và train
     trainer = TwoStageTrainer(model, data_module, train_config)
     history = trainer.train()
+    
+    # Lưu metrics
+    report_generator = PerformanceReport()
+    experiment_dir = report_generator.save_metrics(history)
+    logger.info(f"Đã lưu training metrics tại: {experiment_dir}")
     
     return model, history
 
