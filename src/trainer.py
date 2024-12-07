@@ -14,7 +14,7 @@ from tqdm import tqdm
 from sklearn.metrics import classification_report
 
 from .config import ModelConfig, DataConfig, TrainingConfig
-from .model import AnimalValidationModel, AnimalClassifier, TwoStageClassifier
+from .model import AnimalClassifier, TwoStageClassifier
 from .data import AnimalDataModule
 from .reporting.report_generator import PerformanceReport
 
@@ -44,38 +44,31 @@ class EarlyStopping:
             self.counter = 0
         return self.should_stop
 
-class StageTrainer:
-    """Base trainer class cho mỗi stage"""
+class Trainer:
+    """Training pipeline cho animal classification model"""
     
     def __init__(
         self,
-        model: nn.Module,
+        model: TwoStageClassifier,
         train_loader: DataLoader,
         val_loader: DataLoader,
-        config: TrainingConfig,
-        stage_name: str
+        config: TrainingConfig
     ):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.config = config
-        self.stage_name = stage_name
         
-        # Thêm current_epoch tracking
-        self.current_epoch = 0
-        
+        # Set up device
         self.device = torch.device(config.device)
         self.model = self.model.to(self.device)
         
-        # Khởi tạo components
+        # Initialize training components
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(
-            self.model.parameters(),
-            lr=config.learning_rate
-        )
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.1,
-            patience=3, verbose=True
+            self.model.classification_model.parameters(),  # Chỉ train classifier
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay
         )
         
         # Mixed precision training
@@ -83,12 +76,12 @@ class StageTrainer:
         
         # Monitoring
         self.writer = SummaryWriter(
-            config.tensorboard_dir / f"{stage_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            config.tensorboard_dir / f"trainer_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
         self.early_stopping = EarlyStopping(patience=config.early_stopping_patience)
         
         # Tạo thư mục checkpoints
-        self.checkpoint_dir = config.checkpoint_dir / stage_name
+        self.checkpoint_dir = config.checkpoint_dir / "trainer"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         # Thêm report generator
@@ -106,7 +99,7 @@ class StageTrainer:
             'learning_rate': []
         }
         
-        logger.info(f"Khởi tạo trainer cho {stage_name} với device: {self.device}")
+        logger.info(f"Khởi tạo trainer cho {self.device}")
 
     def train_epoch(self) -> Dict[str, float]:
         """Train một epoch"""
@@ -119,7 +112,7 @@ class StageTrainer:
         batch_losses = []
         batch_accuracies = []
         
-        pbar = tqdm(self.train_loader, desc=f"Training {self.stage_name}")
+        pbar = tqdm(self.train_loader, desc="Training")
         for batch_idx, (images, targets) in enumerate(pbar):
             images, targets = images.to(self.device), targets.to(self.device)
             
@@ -148,8 +141,8 @@ class StageTrainer:
             
             # Log to TensorBoard
             step = batch_idx + len(self.train_loader) * self.current_epoch
-            self.writer.add_scalar(f'{self.stage_name}/train_loss', loss.item(), step)
-            self.writer.add_scalar(f'{self.stage_name}/train_accuracy', 
+            self.writer.add_scalar('train_loss', loss.item(), step)
+            self.writer.add_scalar('train_accuracy', 
                                  100. * correct / total, step)
         
         # Calculate epoch metrics
@@ -174,7 +167,7 @@ class StageTrainer:
         all_targets = []
         all_predictions = []
         
-        for images, targets in tqdm(self.val_loader, desc=f"Validating {self.stage_name}"):
+        for images, targets in tqdm(self.val_loader, desc="Validating"):
             images, targets = images.to(self.device), targets.to(self.device)
             
             with torch.amp.autocast('cuda', enabled=self.config.mixed_precision):
@@ -275,7 +268,7 @@ class StageTrainer:
                     y_true=val_true,
                     y_pred=val_pred,
                     classes=['carnivore', 'herbivore'],
-                    experiment_name=f"{self.stage_name}_epoch_{epoch}"
+                    experiment_name=f"epoch_{epoch}"
                 )
             
             # Save checkpoint nếu model tốt hơn
@@ -295,132 +288,18 @@ class StageTrainer:
             y_true=val_true,
             y_pred=val_pred,
             classes=['carnivore', 'herbivore'],
-            experiment_name=f"{self.stage_name}_final"
+            experiment_name="final"
         )
         
         logger.info(f"Training completed. Final report generated at: {final_report_dir}")
         return self.metrics
-
-class TwoStageTrainer:
-    """Trainer chính quản lý việc huấn luyện cả 2 stage"""
-    
-    def __init__(
-        self,
-        model: TwoStageClassifier,
-        data_module: AnimalDataModule,
-        config: TrainingConfig
-    ):
-        self.model = model
-        self.data_module = data_module
-        self.config = config
-        
-        # Lấy data loaders
-        train_loader, val_loader, _ = data_module.get_data_loaders()
-        
-        # Khởi tạo trainers cho từng stage
-        self.stage1_trainer = StageTrainer(
-            model.validation_model,  # Sử dụng validation_model
-            train_loader,
-            val_loader,
-            config,
-            "stage1_validation"
-        )
-        
-        self.stage2_trainer = StageTrainer(
-            model.classification_model,  # Sử dụng classification_model
-            train_loader,
-            val_loader,
-            config,
-            "stage2_classifier"
-        )
-    
-    def train(self) -> Dict[str, Dict[str, List[float]]]:
-        """Huấn luyện toàn bộ hệ thống"""
-        history = {
-            'stage1': {
-                'train_loss': [], 'train_accuracy': [],
-                'val_loss': [], 'val_accuracy': []
-            },
-            'stage2': {
-                'train_loss': [], 'train_accuracy': [],
-                'val_loss': [], 'val_accuracy': []
-            }
-        }
-        
-        # Train Stage 1: Validation model
-        logger.info("=== Bắt đầu huấn luyện Stage 1: Validation Model ===")
-        for epoch in range(self.config.num_epochs):
-            logger.info(f"\nEpoch {epoch+1}/{self.config.num_epochs}")
-            
-            # Cập nhật current_epoch
-            self.stage1_trainer.current_epoch = epoch
-            
-            # Training
-            train_metrics = self.stage1_trainer.train_epoch()
-            val_metrics, val_true, val_pred = self.stage1_trainer.validate()  # Unpack tuple
-            
-            # Update history
-            history['stage1']['train_loss'].append(train_metrics['loss'])
-            history['stage1']['train_accuracy'].append(train_metrics['accuracy'])
-            history['stage1']['val_loss'].append(val_metrics['loss'])
-            history['stage1']['val_accuracy'].append(val_metrics['accuracy'])
-            
-            # Log metrics
-            logger.info(f"Train Loss: {train_metrics['loss']:.4f}, "
-                       f"Train Acc: {train_metrics['accuracy']:.2f}%, "
-                       f"Val Loss: {val_metrics['loss']:.4f}, "
-                       f"Val Acc: {val_metrics['accuracy']:.2f}%")
-            
-            # Early stopping check
-            if self.stage1_trainer.early_stopping(val_metrics['loss']):
-                logger.info("Early stopping cho Stage 1")
-                break
-            
-            # Save checkpoint
-            if (epoch + 1) % 5 == 0:
-                self.stage1_trainer.save_checkpoint(epoch, val_metrics)
-        
-        # Train Stage 2: Classification model
-        logger.info("\n=== Bắt đầu huấn luyện Stage 2: Classification Model ===")
-        for epoch in range(self.config.num_epochs):
-            logger.info(f"\nEpoch {epoch+1}/{self.config.num_epochs}")
-            
-            # Cập nhật current_epoch
-            self.stage2_trainer.current_epoch = epoch
-            
-            # Training
-            train_metrics = self.stage2_trainer.train_epoch()
-            val_metrics, val_true, val_pred = self.stage2_trainer.validate()  # Unpack tuple
-            
-            # Update history
-            history['stage2']['train_loss'].append(train_metrics['loss'])
-            history['stage2']['train_accuracy'].append(train_metrics['accuracy'])
-            history['stage2']['val_loss'].append(val_metrics['loss'])
-            history['stage2']['val_accuracy'].append(val_metrics['accuracy'])
-            
-            # Log metrics
-            logger.info(f"Train Loss: {train_metrics['loss']:.4f}, "
-                       f"Train Acc: {train_metrics['accuracy']:.2f}%, "
-                       f"Val Loss: {val_metrics['loss']:.4f}, "
-                       f"Val Acc: {val_metrics['accuracy']:.2f}%")
-            
-            # Early stopping check
-            if self.stage2_trainer.early_stopping(val_metrics['loss']):
-                logger.info("Early stopping cho Stage 2")
-                break
-            
-            # Save checkpoint
-            if (epoch + 1) % 5 == 0:
-                self.stage2_trainer.save_checkpoint(epoch, val_metrics)
-        
-        return history
 
 def train_two_stage_model(
     data_config: DataConfig,
     model_config: ModelConfig,
     train_config: Optional[TrainingConfig] = None
 ) -> Tuple[TwoStageClassifier, Dict[str, Dict[str, List[float]]]]:
-    """Hàm helper để khởi tạo và train toàn bộ hệ th��ng"""
+    """Hàm helper để khởi tạo và train toàn bộ hệ thống"""
     if train_config is None:
         train_config = TrainingConfig()
     
@@ -432,8 +311,8 @@ def train_two_stage_model(
     model = TwoStageClassifier(model_config).to(device)
     
     # Khởi tạo trainer và train
-    trainer = TwoStageTrainer(model, data_module, train_config)
-    history = trainer.train()
+    trainer = Trainer(model, data_module.train_loader, data_module.val_loader, train_config)
+    history = trainer.train(train_config.num_epochs)
     
     return model, history
 

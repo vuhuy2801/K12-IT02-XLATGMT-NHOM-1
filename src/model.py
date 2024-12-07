@@ -16,63 +16,8 @@ from .detector import YOLODetector, Detection
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class AnimalValidationModel(nn.Module):
-    """Stage 1: Kiểm tra xem ảnh có phải động vật không"""
-    
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.config = config
-        
-        # Load ResNet18 cho stage 1 (nhẹ hơn ResNet50)
-        if config.stage1_model == "resnet18":
-            base_model = models.resnet18(pretrained=config.pretrained)
-        else:
-            raise ValueError(f"Model {config.stage1_model} không được hỗ trợ cho validation")
-            
-        # Freeze backbone nếu cần
-        if config.freeze_backbone:
-            for param in base_model.parameters():
-                param.requires_grad = False
-                
-        # Thay đổi lớp cuối để phù hợp với ImageNet animal classes
-        num_features = base_model.fc.in_features
-        base_model.fc = nn.Sequential(
-            nn.Linear(num_features, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, len(self.get_animal_classes()))
-        )
-        
-        self.model = base_model
-        
-    def get_animal_classes(self) -> List[int]:
-        """Trả về list các class động vật trong ImageNet"""
-        # ImageNet indices cho các class động vật
-        return (
-            list(range(151, 268)) +  # Mammals
-            list(range(270, 374)) +  # Birds
-            list(range(38, 68))      # Reptiles, amphibians
-        )
-        
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass returns only logits for training
-        """
-        outputs = self.model(x)
-        return outputs
-    
-    def get_prediction_with_confidence(self, x: Tensor) -> Tuple[Tensor, float]:
-        """
-        Get both prediction and confidence score (for inference)
-        """
-        outputs = self.model(x)
-        probabilities = torch.nn.functional.softmax(outputs, dim=1)
-        confidence = torch.max(probabilities, dim=1)[0]
-        
-        return outputs, confidence
-
 class CustomHead(nn.Module):
-    """Custom classification head cho stage 2"""
+    """Custom classification head cho classifier"""
     
     def __init__(self, in_features: int, config: ModelConfig):
         super().__init__()
@@ -139,14 +84,13 @@ class AnimalClassifier(nn.Module):
         return self.backbone(x)
 
 class TwoStageClassifier(nn.Module):
-    """Mô hình 2 giai đoạn: YOLO Detection + Classification"""
+    """YOLO Detection + Classification Model"""
     
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         
-        # Khởi tạo các models
-        self.validation_model = AnimalValidationModel(config)
+        # Khởi tạo classifier
         self.classification_model = AnimalClassifier(config)
         
         # Đảm bảo detector được khởi tạo
@@ -190,7 +134,7 @@ class TwoStageClassifier(nn.Module):
         if not crops:
             return []
         
-        # Stack tất cả crops thành một batch và squeeze để bỏ dimension thừa
+        # Stack tất cả crops thành một batch
         batch = torch.cat(crops, dim=0)  # [N, 3, 224, 224]
         
         # Predict một lần cho cả batch

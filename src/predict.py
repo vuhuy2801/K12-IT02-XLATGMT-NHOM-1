@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Dict, Any, Union, Tuple, List, Optional
+from typing import Dict, Any
 import time
 
 import torch
@@ -25,7 +25,6 @@ class Predictor:
     def __init__(self, model: TwoStageClassifier, config: PredictionConfig):
         self.model = model
         self.config = config
-        self.device = torch.device(config.device)
         self.model.eval()
         
     def predict(self, image: Image.Image) -> Dict[str, Any]:
@@ -62,7 +61,7 @@ class Predictor:
                 class_confidence = probs[pred_class].item()
                 
                 # Determine animal type
-                animal_type = 'Động vật ăn thịt' if pred_class == 0 else 'Động vật ăn cỏ'
+                animal_type = 'carnivore' if pred_class == 0 else 'herbivore'
                 
                 pred_dict = {
                     'bbox': detection.bbox,
@@ -78,17 +77,16 @@ class Predictor:
             }
             
         except PredictionException as e:
-            logger.warning(f"Prediction error: {str(e)}")
             return {
                 'status': 'error',
                 'message': str(e),
                 'predictions': []
             }
         except Exception as e:
-            logger.error(f"Unexpected error during prediction: {str(e)}")
+            logger.error(f"Prediction error: {str(e)}")
             return {
                 'status': 'error',
-                'message': 'Lỗi không xác định trong quá trình xử lý',
+                'message': 'Internal prediction error',
                 'predictions': []
             }
 
@@ -96,22 +94,25 @@ def create_predictor(
     model_config: ModelConfig,
     prediction_config: PredictionConfig
 ) -> Predictor:
-    """Tạo và cấu hình predictor"""
-    
+    """Tạo predictor từ config"""
     try:
-        # Khởi tạo model
+        # Load model
+        device = torch.device(prediction_config.device)
         model = TwoStageClassifier(model_config)
-        model = model.to(prediction_config.device)
+        
+        # Load stage 2 weights nếu được chỉ định
+        if prediction_config.stage2_model_path:
+            checkpoint = torch.load(prediction_config.stage2_model_path, map_location=device)
+            model.classification_model.load_state_dict(checkpoint['model_state_dict'])
+            logger.info(f"Loaded stage 2 weights from {prediction_config.stage2_model_path}")
+        
+        model = model.to(device)
         model.eval()
         
-        # Tạo predictor
-        predictor = Predictor(model, prediction_config)
-        logger.info("Đã khởi tạo predictor thành công")
-        
-        return predictor
+        return Predictor(model, prediction_config)
         
     except Exception as e:
-        logger.error(f"Lỗi khi tạo predictor: {str(e)}")
+        logger.error(f"Error creating predictor: {str(e)}")
         raise
 
 # Example usage

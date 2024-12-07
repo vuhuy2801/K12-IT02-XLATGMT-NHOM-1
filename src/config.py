@@ -56,30 +56,24 @@ class YOLOConfig:
 @dataclass
 class ModelConfig:
     """Cấu hình cho model"""
-    # Stage 1: Animal Validation
-    validation_threshold: float = 0.8
-    stage1_model: str = "resnet18"
-    
-    # Stage 2: Carnivore/Herbivore Classification
-    classification_threshold: float = 0.60
-    stage2_model: str = "resnet50"
-    num_classes: int = 2
+    # Classification parameters
+    num_classes: int = 2  # carnivore/herbivore
     hidden_dim: int = 512
     dropout1: float = 0.5
     dropout2: float = 0.3
     
-    # Chung cho cả 2 stage
+    # Model architecture
+    stage2_model: str = "resnet50"
     pretrained: bool = True
     freeze_backbone: bool = True
     
-    # Thêm YOLO config
+    # YOLO config
     yolo: YOLOConfig = field(default_factory=YOLOConfig)
     
-    # Thêm các tham số mới
-    use_detection: bool = True  # Thay đổi từ False thành True
-    min_detection_size: Tuple[int, int] = (32, 32)  # Kích thước tối thiểu cho detected objects
+    # Detection parameters
+    use_detection: bool = True
+    min_detection_size: Tuple[int, int] = (32, 32)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    use_validation_model: bool = True  # Bật/tắt validation stage
 
 @dataclass
 class TrainingConfig:
@@ -144,7 +138,7 @@ def load_config():
     training_config = TrainingConfig() 
     prediction_config = PredictionConfig(
         stage1_model_path=Path("models/stage1_validation/checkpoint_epoch_19.pt"),
-        stage2_model_path=Path("models/stage2_classifier/checkpoint_epoch_4.pt"),
+        stage2_model_path=Path("models/stage2_classifier/checkpoint_epoch_9.pt"),
         show_confidence=True,
         confidence_decimal_places=2
     )

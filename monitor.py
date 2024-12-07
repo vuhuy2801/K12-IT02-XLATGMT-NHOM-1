@@ -210,7 +210,7 @@ class ModelMonitor:
                     probs = torch.softmax(logits, dim=0)
                     pred_class = torch.argmax(probs).item()
                     class_confidence = probs[pred_class].item()
-                    animal_type = 'carnivore' if pred_class == 0 else 'herbivore'
+                    animal_type = 'Động vật ăn thịt' if pred_class == 0 else 'Động vật ăn cỏ'
                     
                     detection_dict = {
                         'bbox': det.bbox,
