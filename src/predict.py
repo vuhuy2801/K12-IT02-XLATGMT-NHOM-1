@@ -61,7 +61,7 @@ class Predictor:
                 class_confidence = probs[pred_class].item()
                 
                 # Determine animal type
-                animal_type = 'carnivore' if pred_class == 0 else 'herbivore'
+                animal_type = 'Động vật ăn thịt' if pred_class == 0 else 'Động vật ăn cỏ'
                 
                 pred_dict = {
                     'bbox': detection.bbox,
