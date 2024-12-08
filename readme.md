@@ -60,14 +60,10 @@ Tổng số ảnh: 5,400
 - Validation: 810 ảnh  
 - Test: 810 ảnh
 
-Phân bố các lớp:
-- Động vật ăn thịt: 2,700 ảnh (50%)
-- Động vật ăn cỏ: 2,700 ảnh (50%)
-
 ## Kiến Trúc Hệ Thống
 
 ### Module Tiền Xử Lý Input
-- Chuẩn hóa kích thước ảnh về 640x640
+- Chuẩn hóa kích thước ảnh về 224x224
 - Chuẩn hóa giá trị pixel về khoảng [0,1]
 - Data augmentation khi training
 
