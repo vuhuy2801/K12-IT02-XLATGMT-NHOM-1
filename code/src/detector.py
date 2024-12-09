@@ -30,18 +30,15 @@ class YOLODetector:
             
     def detect(self, image: Image.Image) -> List[Detection]:
         """
-        Detect objects trong ảnh, chỉ trả về bounding boxes
-        
-        Args:
-            image: PIL Image
-            
-        Returns:
-            List[Detection]: Danh sách các detection t��m thấy
+        Detect objects trong ảnh
         """
         # Convert PIL Image to format YOLO expects
         img_array = np.array(image)
         
-        # Run detection
+        # Run detection với kiến trúc:
+        # 1. Backbone: CSPDarknet 
+        # 2. Neck: PANet
+        # 3. Head: Decoupled Head
         results = self.model(
             img_array,
             conf=self.config.confidence_threshold,
